@@ -1,17 +1,49 @@
 import type { Database } from 'sql.js';
 import type { Step, TablePreview } from '../components/StepCard';
 import type { QueryResult } from '../components/ResultTable';
-import { makeStandardValidator } from './chapter1';
 
+/** Helper: run SQL and return standardized result */
 function execQuery(db: Database, sql: string): QueryResult {
   const res = db.exec(sql);
   if (!res || res.length === 0) return { columns: [], rows: [] };
   return { columns: res[0].columns, rows: res[0].values as any[][] };
 }
 
+/** Standard validator: compare user result against model result */
+export function makeStandardValidator(modelSql: string, opts?: { enforceOrder?: boolean }) {
+  const enforceOrder = opts?.enforceOrder ?? true;
+  return async (db: Database, user: QueryResult | null) => {
+    if (!user) return { ok: false, hint: 'Run your SQL first.' };
+    let model: QueryResult;
+    try {
+      model = execQuery(db, modelSql);
+    } catch {
+      return { ok: false, hint: 'Internal model failed.' };
+    }
+    const colsMatch = JSON.stringify(user.columns) === JSON.stringify(model.columns);
+    if (!colsMatch) return { ok: false, hint: 'Columns mismatch. Check names/order.' };
+    if (user.rows.length !== model.rows.length) {
+      return { ok: false, hint: `Row count should be ${model.rows.length}.` };
+    }
+    const norm = (v: any) => (typeof v === 'string' ? v.trim() : v);
+    const A = enforceOrder ? user.rows : [...user.rows].sort();
+    const B = enforceOrder ? model.rows : [...model.rows].sort();
+    for (let i = 0; i < A.length; i++) {
+      const ra = A[i], rb = B[i];
+      if (ra.length !== rb.length) return { ok: false, hint: 'Row shape mismatch.' };
+      for (let j = 0; j < ra.length; j++) {
+        if (norm(ra[j]) !== norm(rb[j])) {
+          return { ok: false, hint: enforceOrder ? 'Ordering or values differ.' : 'Values differ.' };
+        }
+      }
+    }
+    return { ok: true };
+  };
+}
+
 const shiftPreview: TablePreview = {
   name: 'shift_logs',
-  description: 'We’ll stay on a single table while introducing aggregates.',
+  description: 'Scheduled and recorded shift activity (seeded for August 2025).',
   columns: [
     { name: 'employee_id', description: 'Numeric employee id' },
     { name: 'employee_name', description: 'Name' },
@@ -20,154 +52,183 @@ const shiftPreview: TablePreview = {
     { name: 'clock_in', description: 'Start time HH:MM' },
     { name: 'clock_out', description: 'End time HH:MM or NULL' }
   ],
-  sampleRowsSql: `SELECT * FROM shift_logs ORDER BY date DESC, employee_id LIMIT 5;`
+  sampleRowsSql: `SELECT * FROM shift_logs ORDER BY date, employee_id LIMIT 5;`
 };
 
 export const chapter2: Step[] = [
   {
     id: '2-1',
-    title: 'Late Nights — count per employee (last 30 days)',
-    tools: ['COUNT(*)', 'GROUP BY', 'WHERE'],
-    challenge: 'Who burns the midnight oil? Count shifts with clock_out ≥ 23:00 in the last 30 days.',
+    title: 'Late Nights — Count per employee',
+    tools: ['COUNT', 'GROUP BY', 'WHERE', 'ORDER BY', 'DESC'],
+    challenge: 'Patterns over time whisper the truth.',
+    plainRequest: 'In the last 30 days, count how many shifts each person ended at or after 11:00 PM. List name and the count. Sort by the biggest counts first, then by name.',
     dataPreview: [shiftPreview],
     expectedShape: [
       'Columns: employee_name, late_nights',
-      'Sort by late_nights DESC, then employee_name ASC'
+      "Filter: clock_out >= '23:00' (ignore NULLs), date >= '2025-07-28'",
+      'Sorted by late_nights DESC, employee_name ASC'
     ],
     modelSql: `
-SELECT employee_name, COUNT(*) AS late_nights
+SELECT employee_name,
+       COUNT(*) AS late_nights
 FROM shift_logs
-WHERE date BETWEEN '2025-07-29' AND '2025-08-27'
+WHERE clock_out IS NOT NULL
   AND clock_out >= '23:00'
+  AND date >= '2025-07-28'
 GROUP BY employee_name
 ORDER BY late_nights DESC, employee_name ASC;
 `.trim(),
     validator: makeStandardValidator(`
-SELECT employee_name, COUNT(*) AS late_nights
+SELECT employee_name,
+       COUNT(*) AS late_nights
 FROM shift_logs
-WHERE date BETWEEN '2025-07-29' AND '2025-08-27'
+WHERE clock_out IS NOT NULL
   AND clock_out >= '23:00'
+  AND date >= '2025-07-28'
 GROUP BY employee_name
 ORDER BY late_nights DESC, employee_name ASC;`.trim(), { enforceOrder: true }),
-    reflection: 'Volume reveals habit. Habit sets expectations; deviations break them.',
+    reflection: 'Roll-ups turn anecdotes into signals.',
     practices: [
-      { prompt: 'Count late_nights for August only.', solutionSql: `SELECT employee_name, COUNT(*) AS late_nights FROM shift_logs WHERE date LIKE '2025-08-%' AND clock_out >= '23:00' GROUP BY employee_name ORDER BY late_nights DESC, employee_name;` }
+      { prompt: 'Count late nights per role.', solutionSql: `SELECT role, COUNT(*) AS late_nights FROM shift_logs WHERE clock_out >= '23:00' AND clock_out IS NOT NULL GROUP BY role ORDER BY late_nights DESC, role;` },
+      { prompt: 'Top 3 names by late_nights.', solutionSql: `SELECT employee_name, COUNT(*) AS late_nights FROM shift_logs WHERE clock_out IS NOT NULL AND clock_out >= '23:00' GROUP BY employee_name ORDER BY late_nights DESC, employee_name LIMIT 3;` }
     ],
-    caseNote: 'Profiled late-night propensity per employee.'
+    caseNote: 'Tallied late-night frequency per employee.',
+    starterSql: `-- Count late nights (>= 23:00) in the last 30 days.
+SELECT employee_name, COUNT(*) AS late_nights
+FROM shift_logs
+-- WHERE ...
+GROUP BY employee_name
+ORDER BY late_nights DESC, employee_name;`,
+    keywords: ['SELECT','FROM','WHERE','GROUP BY','COUNT','ORDER BY','DESC'],
+    hints: [
+      'Exclude NULL clock_out and compare times using the same HH:MM format.',
+      "Add a date window: date >= '2025-07-28'.",
+      'Sort by count DESC, then name ASC.'
+    ]
   },
   {
     id: '2-2',
-    title: 'Average clock-out hour per employee',
-    tools: ['AVG()', 'GROUP BY', 'printf() formatting'],
-    challenge: 'What’s “normal” for each person? Compute average clock_out time.',
+    title: 'Average Exit — Clock-out hour per person',
+    tools: ['AVG', 'GROUP BY', 'WHERE', 'ORDER BY', 'ROUND'],
+    challenge: 'Averages mute the noise.',
+    plainRequest: 'For each person, what time do they usually leave? Return name and the average clock-out hour as a number (e.g., 22.75 for 10:45 PM). Sort by name.',
     dataPreview: [shiftPreview],
     expectedShape: [
-      'Columns: employee_name, avg_clock_out',
-      'avg_clock_out formatted HH:MM, exclude NULL clock_out'
+      'Columns: employee_name, avg_out_hour',
+      'avg_out_hour rounded to 2 decimals',
+      'Ignore rows where clock_out is NULL',
+      'Sorted by employee_name ASC'
     ],
     modelSql: `
 SELECT employee_name,
-       printf('%02d:%02d',
-         CAST(avg_mins/60 AS INT),
-         CAST(avg_mins%60 AS INT)
-       ) AS avg_clock_out
-FROM (
-  SELECT employee_name,
-         AVG(CAST(substr(clock_out,1,2) AS INT)*60 + CAST(substr(clock_out,4,2) AS INT)) AS avg_mins
-  FROM shift_logs
-  WHERE clock_out IS NOT NULL
-  GROUP BY employee_name
-)
-ORDER BY employee_name;
+       ROUND(AVG(
+         CAST(substr(clock_out,1,2) AS INTEGER) +
+         CAST(substr(clock_out,4,2) AS INTEGER)/60.0
+       ), 2) AS avg_out_hour
+FROM shift_logs
+WHERE clock_out IS NOT NULL
+GROUP BY employee_name
+ORDER BY employee_name ASC;
 `.trim(),
     validator: makeStandardValidator(`
 SELECT employee_name,
-       printf('%02d:%02d',
-         CAST(avg_mins/60 AS INT),
-         CAST(avg_mins%60 AS INT)
-       ) AS avg_clock_out
-FROM (
-  SELECT employee_name,
-         AVG(CAST(substr(clock_out,1,2) AS INT)*60 + CAST(substr(clock_out,4,2) AS INT)) AS avg_mins
-  FROM shift_logs
-  WHERE clock_out IS NOT NULL
-  GROUP BY employee_name
-)
-ORDER BY employee_name;`.trim(), { enforceOrder: true }),
-    reflection: 'Know the baseline to recognize the anomaly.',
+       ROUND(AVG(
+         CAST(substr(clock_out,1,2) AS INTEGER) +
+         CAST(substr(clock_out,4,2) AS INTEGER)/60.0
+       ), 2) AS avg_out_hour
+FROM shift_logs
+WHERE clock_out IS NOT NULL
+GROUP BY employee_name
+ORDER BY employee_name ASC;`.trim(), { enforceOrder: true }),
+    reflection: 'Averages give each name a “center of gravity.”',
     practices: [
-      { prompt: 'Return average in minutes (number).', solutionSql: `SELECT employee_name, ROUND(AVG(CAST(substr(clock_out,1,2) AS INT)*60 + CAST(substr(clock_out,4,2) AS INT)),1) AS avg_minutes FROM shift_logs WHERE clock_out IS NOT NULL GROUP BY employee_name ORDER BY employee_name;` }
+      { prompt: 'Average clock-in hour per employee.', solutionSql: `SELECT employee_name, ROUND(AVG(CAST(substr(clock_in,1,2) AS INTEGER) + CAST(substr(clock_in,4,2) AS INTEGER)/60.0),2) AS avg_in_hour FROM shift_logs GROUP BY employee_name ORDER BY employee_name;` },
+      { prompt: 'Average clock-out hour per role.', solutionSql: `SELECT role, ROUND(AVG(CAST(substr(clock_out,1,2) AS INTEGER) + CAST(substr(clock_out,4,2) AS INTEGER)/60.0),2) AS avg_out_hour FROM shift_logs WHERE clock_out IS NOT NULL GROUP BY role ORDER BY role;` }
     ],
-    caseNote: 'Computed baseline exit times per employee.'
+    caseNote: 'Computed average exit time per employee.',
+    starterSql: `-- Convert HH:MM to hours as number; average per name.
+SELECT employee_name, /* AVG(...) */ 0 AS avg_out_hour
+FROM shift_logs
+GROUP BY employee_name
+ORDER BY employee_name;`,
+    keywords: ['SELECT','FROM','WHERE','GROUP BY','AVG','ROUND','ORDER BY'],
+    hints: [
+      'Turn HH:MM into hours using substr() and arithmetic.',
+      'Ignore NULL clock_out rows.',
+      'Round to 2 decimals and sort by name.'
+    ]
   },
   {
     id: '2-3',
-    title: 'Fire-night vs personal average (simple subquery)',
-    tools: ['Subquery in SELECT', 'AVG()', 'comparisons'],
-    challenge: 'On 2025-08-27, did anyone clock out later than their personal average (before that date)?',
+    title: 'Baseline vs. Fire Night — Personal comparison',
+    tools: ['GROUP BY', 'AVG', 'subquery', 'WHERE', 'ORDER BY', 'MAX'],
+    challenge: 'Compare the night in question to each person’s normal.',
+    plainRequest: 'For everyone who worked on August 27, 2025, show: (1) their latest clock-out time that night and (2) their own average clock-out hour from before that date. Return name, those two values; sort by name.',
     dataPreview: [shiftPreview],
     expectedShape: [
-      'Columns: employee_name, fire_clock_out, avg_before_mins, delta_minutes',
-      'Only employees with non-NULL fire_clock_out'
+      'Columns: employee_name, fire_night_out, avg_out_hour_before',
+      "fire_night_out may be NULL if none recorded that night",
+      'avg_out_hour_before rounded to 2 decimals',
+      'Sorted by employee_name ASC'
     ],
     modelSql: `
 SELECT s.employee_name,
-       s.clock_out AS fire_clock_out,
+       MAX(s.clock_out) AS fire_night_out,
        ROUND((
-         SELECT AVG(CAST(substr(clock_out,1,2) AS INT)*60 + CAST(substr(clock_out,4,2) AS INT))
-         FROM shift_logs
-         WHERE employee_name = s.employee_name
-           AND date < '2025-08-27'
-           AND clock_out IS NOT NULL
-       ), 1) AS avg_before_mins,
-       (CAST(substr(s.clock_out,1,2) AS INT)*60 + CAST(substr(s.clock_out,4,2) AS INT)) -
-       (
-         SELECT AVG(CAST(substr(clock_out,1,2) AS INT)*60 + CAST(substr(clock_out,4,2) AS INT))
-         FROM shift_logs
-         WHERE employee_name = s.employee_name
-           AND date < '2025-08-27'
-           AND clock_out IS NOT NULL
-       ) AS delta_minutes
+         SELECT AVG(CAST(substr(x.clock_out,1,2) AS INTEGER) + CAST(substr(x.clock_out,4,2) AS INTEGER)/60.0)
+         FROM shift_logs x
+         WHERE x.employee_name = s.employee_name
+           AND x.clock_out IS NOT NULL
+           AND x.date < '2025-08-27'
+       ), 2) AS avg_out_hour_before
 FROM shift_logs s
-WHERE s.date = '2025-08-27' AND s.clock_out IS NOT NULL
-ORDER BY s.employee_name;
+WHERE s.date = '2025-08-27'
+GROUP BY s.employee_name
+ORDER BY s.employee_name ASC;
 `.trim(),
     validator: makeStandardValidator(`
 SELECT s.employee_name,
-       s.clock_out AS fire_clock_out,
+       MAX(s.clock_out) AS fire_night_out,
        ROUND((
-         SELECT AVG(CAST(substr(clock_out,1,2) AS INT)*60 + CAST(substr(clock_out,4,2) AS INT))
-         FROM shift_logs
-         WHERE employee_name = s.employee_name
-           AND date < '2025-08-27'
-           AND clock_out IS NOT NULL
-       ), 1) AS avg_before_mins,
-       (CAST(substr(s.clock_out,1,2) AS INT)*60 + CAST(substr(s.clock_out,4,2) AS INT)) -
-       (
-         SELECT AVG(CAST(substr(clock_out,1,2) AS INT)*60 + CAST(substr(clock_out,4,2) AS INT))
-         FROM shift_logs
-         WHERE employee_name = s.employee_name
-           AND date < '2025-08-27'
-           AND clock_out IS NOT NULL
-       ) AS delta_minutes
+         SELECT AVG(CAST(substr(x.clock_out,1,2) AS INTEGER) + CAST(substr(x.clock_out,4,2) AS INTEGER)/60.0)
+         FROM shift_logs x
+         WHERE x.employee_name = s.employee_name
+           AND x.clock_out IS NOT NULL
+           AND x.date < '2025-08-27'
+       ), 2) AS avg_out_hour_before
 FROM shift_logs s
-WHERE s.date = '2025-08-27' AND s.clock_out IS NOT NULL
-ORDER BY s.employee_name;`.trim(), { enforceOrder: true }),
-    reflection: 'A spike against baseline is a whisper. Enough whispers become a voice.',
+WHERE s.date = '2025-08-27'
+GROUP BY s.employee_name
+ORDER BY s.employee_name ASC;`.trim(), { enforceOrder: true }),
+    reflection: 'Context matters. One late night is noise—late against their baseline is a lead.',
     practices: [
-      { prompt: 'Return only those with delta_minutes ≥ 10.', solutionSql: `SELECT * FROM ( /* same as above */ SELECT s.employee_name AS employee_name, s.clock_out AS fire_clock_out, ROUND((SELECT AVG(CAST(substr(clock_out,1,2) AS INT)*60 + CAST(substr(clock_out,4,2) AS INT)) FROM shift_logs WHERE employee_name = s.employee_name AND date < '2025-08-27' AND clock_out IS NOT NULL),1) AS avg_before_mins, (CAST(substr(s.clock_out,1,2) AS INT)*60 + CAST(substr(s.clock_out,4,2) AS INT)) - (SELECT AVG(CAST(substr(clock_out,1,2) AS INT)*60 + CAST(substr(clock_out,4,2) AS INT)) FROM shift_logs WHERE employee_name = s.employee_name AND date < '2025-08-27' AND clock_out IS NOT NULL) AS delta_minutes FROM shift_logs s WHERE s.date='2025-08-27' AND s.clock_out IS NOT NULL) WHERE delta_minutes >= 10 ORDER BY employee_name;` }
+      { prompt: 'Fire-night *earliest* vs. average before.', solutionSql: `SELECT s.employee_name, MIN(s.clock_out) AS fire_first_out, ROUND((SELECT AVG(CAST(substr(x.clock_out,1,2) AS INTEGER) + CAST(substr(x.clock_out,4,2) AS INTEGER)/60.0) FROM shift_logs x WHERE x.employee_name=s.employee_name AND x.clock_out IS NOT NULL AND x.date<'2025-08-27'),2) AS avg_before FROM shift_logs s WHERE s.date='2025-08-27' GROUP BY s.employee_name ORDER BY s.employee_name;` }
     ],
-    caseNote: 'Measured fire-night exits vs personal averages.'
+    caseNote: 'Compared fire-night exits to personal baselines.',
+    starterSql: `-- Use a subquery in SELECT to get per-person average before 2025-08-27.
+SELECT employee_name, /* fire_night_out */, /* avg_out_hour_before */
+FROM shift_logs
+WHERE date='2025-08-27'
+GROUP BY employee_name
+ORDER BY employee_name;`,
+    keywords: ['SELECT','FROM','WHERE','GROUP BY','AVG','ORDER BY','subquery','MAX'],
+    hints: [
+      'Group by employee_name for the fire night.',
+      'Use a scalar subquery to compute the per-person average before the date.',
+      'Round to 2 decimals; order by name.'
+    ]
   },
   {
     id: '2-4',
-    title: 'Range feel — earliest/latest leave per employee',
-    tools: ['MIN()', 'MAX()', 'GROUP BY'],
-    challenge: 'Bookends of behavior. Get earliest and latest clock_out per person (ignoring NULLs).',
+    title: 'Range Sense — Earliest & latest leave',
+    tools: ['MIN', 'MAX', 'GROUP BY', 'WHERE', 'ORDER BY'],
+    challenge: 'Know the boundaries before you hunt the outliers.',
+    plainRequest: 'For each person, show the earliest and latest clock-out time in the last 30 days. Ignore empty end times. Sort by name.',
     dataPreview: [shiftPreview],
     expectedShape: [
       'Columns: employee_name, earliest_out, latest_out',
-      'Sorted by employee_name'
+      "Window: date >= '2025-07-28'",
+      'Sorted by employee_name ASC'
     ],
     modelSql: `
 SELECT employee_name,
@@ -175,8 +236,9 @@ SELECT employee_name,
        MAX(clock_out) AS latest_out
 FROM shift_logs
 WHERE clock_out IS NOT NULL
+  AND date >= '2025-07-28'
 GROUP BY employee_name
-ORDER BY employee_name;
+ORDER BY employee_name ASC;
 `.trim(),
     validator: makeStandardValidator(`
 SELECT employee_name,
@@ -184,51 +246,76 @@ SELECT employee_name,
        MAX(clock_out) AS latest_out
 FROM shift_logs
 WHERE clock_out IS NOT NULL
+  AND date >= '2025-07-28'
 GROUP BY employee_name
-ORDER BY employee_name;`.trim(), { enforceOrder: true }),
-    reflection: 'Ranges put single points in context.',
+ORDER BY employee_name ASC;`.trim(), { enforceOrder: true }),
+    reflection: 'Ranges set the stage for what counts as unusual.',
     practices: [
-      { prompt: 'Also include shift count.', solutionSql: `SELECT employee_name, COUNT(*) AS shifts, MIN(clock_out) AS earliest_out, MAX(clock_out) AS latest_out FROM shift_logs WHERE clock_out IS NOT NULL GROUP BY employee_name ORDER BY shifts DESC, employee_name;` }
+      { prompt: 'Earliest & latest *clock-in* per person.', solutionSql: `SELECT employee_name, MIN(clock_in) AS earliest_in, MAX(clock_in) AS latest_in FROM shift_logs GROUP BY employee_name ORDER BY employee_name;` }
     ],
-    caseNote: 'Computed leave-time ranges per employee.'
+    caseNote: 'Mapped earliest/latest exits by person.',
+    starterSql: `-- Get MIN/MAX over the last 30 days.
+SELECT employee_name,
+       MIN(clock_out) AS earliest_out,
+       MAX(clock_out) AS latest_out
+FROM shift_logs
+-- WHERE ...
+GROUP BY employee_name
+ORDER BY employee_name;`,
+    keywords: ['SELECT','FROM','WHERE','GROUP BY','MIN','MAX','ORDER BY'],
+    hints: [
+      'Filter out NULL clock_out.',
+      "Add date >= '2025-07-28'.",
+      'Group by name and sort by name.'
+    ]
   },
   {
     id: '2-5',
-    title: 'Practice Pack — aggregates in the wild',
-    tools: ['COUNT', 'MIN', 'MAX', 'GROUP BY', 'HAVING (light)'],
-    challenge: 'Build a quick multi-metric glance at recent workload.',
+    title: 'Practice Pack — Aggregates warmup',
+    tools: ['COUNT', 'AVG', 'GROUP BY', 'ORDER BY', 'LIMIT'],
+    challenge: 'Lock in the basics so they don’t lock you out later.',
+    plainRequest: 'Make a quick leaderboard: in the last 30 days, who worked the most shifts? Return the top five with name and number of shifts.',
     dataPreview: [shiftPreview],
     expectedShape: [
-      'Columns: employee_name, shifts, earliest_in, latest_out',
-      'Dates between 2025-08-01 and 2025-08-27 inclusive',
-      'HAVING shifts ≥ 2'
+      'Columns: employee_name, shifts',
+      "Window: date >= '2025-07-28'",
+      'Top 5 by shifts DESC, then employee_name ASC'
     ],
     modelSql: `
 SELECT employee_name,
-       COUNT(*) AS shifts,
-       MIN(clock_in) AS earliest_in,
-       MAX(clock_out) AS latest_out
+       COUNT(*) AS shifts
 FROM shift_logs
-WHERE date BETWEEN '2025-08-01' AND '2025-08-27'
+WHERE date >= '2025-07-28'
 GROUP BY employee_name
-HAVING COUNT(*) >= 2
-ORDER BY shifts DESC, employee_name;
+ORDER BY shifts DESC, employee_name ASC
+LIMIT 5;
 `.trim(),
     validator: makeStandardValidator(`
 SELECT employee_name,
-       COUNT(*) AS shifts,
-       MIN(clock_in) AS earliest_in,
-       MAX(clock_out) AS latest_out
+       COUNT(*) AS shifts
 FROM shift_logs
-WHERE date BETWEEN '2025-08-01' AND '2025-08-27'
+WHERE date >= '2025-07-28'
 GROUP BY employee_name
-HAVING COUNT(*) >= 2
-ORDER BY shifts DESC, employee_name;`.trim(), { enforceOrder: true }),
-    reflection: 'A dashboard isn’t a smoking gun—just a compass that points true north.',
+ORDER BY shifts DESC, employee_name ASC
+LIMIT 5;`.trim(), { enforceOrder: true }),
+    reflection: 'Leaderboards aren’t guilty verdicts, but they point your feet.',
     practices: [
-      { prompt: 'Same query but only show people with latest_out ≥ 23:30.', solutionSql: `SELECT employee_name, COUNT(*) AS shifts, MIN(clock_in) AS earliest_in, MAX(clock_out) AS latest_out FROM shift_logs WHERE date BETWEEN '2025-08-01' AND '2025-08-27' GROUP BY employee_name HAVING COUNT(*) >= 2 AND MAX(clock_out) >= '23:30' ORDER BY shifts DESC, employee_name;` },
-      { prompt: 'Count of shifts per role.', solutionSql: `SELECT role, COUNT(*) AS shifts FROM shift_logs GROUP BY role ORDER BY shifts DESC, role;` }
+      { prompt: 'Average clock-out hour per person (top 5 latest averages).', solutionSql: `SELECT employee_name, ROUND(AVG(CAST(substr(clock_out,1,2) AS INTEGER)+CAST(substr(clock_out,4,2) AS INTEGER)/60.0),2) AS avg_out_hour FROM shift_logs WHERE clock_out IS NOT NULL GROUP BY employee_name ORDER BY avg_out_hour DESC, employee_name LIMIT 5;` },
+      { prompt: 'Shifts per role last 30 days.', solutionSql: `SELECT role, COUNT(*) AS shifts FROM shift_logs WHERE date >= '2025-07-28' GROUP BY role ORDER BY shifts DESC, role;` }
     ],
-    caseNote: 'Aggregated recent workload snapshot.'
+    caseNote: 'Built a simple 30-day shifts leaderboard.',
+    starterSql: `-- Who worked the most (last 30 days)?
+SELECT employee_name, COUNT(*) AS shifts
+FROM shift_logs
+-- WHERE date >= ...
+GROUP BY employee_name
+ORDER BY shifts DESC, employee_name
+LIMIT 5;`,
+    keywords: ['SELECT','FROM','WHERE','GROUP BY','COUNT','ORDER BY','DESC','LIMIT'],
+    hints: [
+      "Window the data to the last 30 days with date >= '2025-07-28'.",
+      'Group by employee_name.',
+      'Order by shifts DESC, then name ASC; limit to 5.'
+    ]
   }
 ];

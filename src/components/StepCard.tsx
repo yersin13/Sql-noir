@@ -17,16 +17,19 @@ export type Step = {
   id: string;
   title: string;
   tools: string[];
-  challenge: string; // compact objective
+  /** Noir mission line (short, mood) */
+  challenge: string;
+  /** NEW: everyday language request for translation to SQL */
+  plainRequest?: string;
   dataPreview: TablePreview[];
-  expectedShape: string[]; // bullets, may mention ordering
+  expectedShape: string[];
   modelSql: string;
   validator: (db: Database, user: QueryResult | null) => Promise<{ ok: boolean; hint?: string }>;
   reflection: string;
   practices: PracticeItem[];
   caseNote?: string;
   starterSql?: string;
-  /** Palette of concept keywords (not clauses) */
+  /** Concept keywords palette (not clauses) */
   keywords?: string[];
   /** Hint ladder, increasing explicitness */
   hints?: string[];
@@ -117,7 +120,6 @@ export default function StepCard({ db, step, completed, onComplete }: Props) {
       t[0].ok = JSON.stringify(userRes.columns) === JSON.stringify(model.columns);
       t[1].ok = userRes.rows.length === model.rows.length;
 
-      // ordering check by comparing first few rows when lengths match
       if (userRes.rows.length === model.rows.length) {
         const k = Math.min(userRes.rows.length, 5);
         const a = userRes.rows.slice(0, k).map((r) => JSON.stringify(r)).join('|');
@@ -164,33 +166,34 @@ export default function StepCard({ db, step, completed, onComplete }: Props) {
         <h2 style={{ margin: '4px 0 0 0' }}>{step.title}</h2>
       </div>
 
-      {/* Compact Objective & Spec */}
+      {/* NEW: Plain Request + Mission */}
       <div className="block">
-        <h3>Objective & Spec</h3>
-        <div className="spec-grid">
-          <div className="challenge">{step.challenge}</div>
-          <div>
-            <div className="small" style={{ marginBottom: 4 }}>
-              Allowed tools
-            </div>
-            <div className="chips">
-              {step.tools.map((t) => (
-                <span key={t} className="chip">
-                  {t}
-                </span>
-              ))}
-            </div>
+        <h3>Plain Request</h3>
+        {step.plainRequest ? (
+          <div className="plainline">{step.plainRequest}</div>
+        ) : (
+          <div className="plainline small">
+            Translate the mission into SQL using the tools below.
           </div>
-          <div>
-            <div className="small" style={{ marginBottom: 4 }}>
-              Expected output
-            </div>
-            <ul style={{ margin: 0, paddingLeft: 18 }}>
-              {step.expectedShape.map((s, i) => (
-                <li key={i}>{s}</li>
-              ))}
-            </ul>
+        )}
+        <div className="small" style={{ marginTop: 8 }}>
+          <b>Mission:</b> {step.challenge}
+        </div>
+
+        <div style={{ marginTop: 10 }}>
+          <div className="small" style={{ marginBottom: 4 }}>Allowed tools</div>
+          <div className="chips">
+            {step.tools.map((t) => (
+              <span key={t} className="chip">{t}</span>
+            ))}
           </div>
+        </div>
+
+        <div style={{ marginTop: 10 }}>
+          <div className="small" style={{ marginBottom: 4 }}>Expected output</div>
+          <ul style={{ margin: 0, paddingLeft: 18 }}>
+            {step.expectedShape.map((s, i) => <li key={i}>{s}</li>)}
+          </ul>
         </div>
       </div>
 
@@ -200,14 +203,10 @@ export default function StepCard({ db, step, completed, onComplete }: Props) {
           <div className="table-meta" key={p.name}>
             <div style={{ fontWeight: 600 }}>{p.name}</div>
             {p.description && <div className="small">{p.description}</div>}
-            <div className="small" style={{ marginTop: 4 }}>
-              Columns:
-            </div>
+            <div className="small" style={{ marginTop: 4 }}>Columns:</div>
             <ul className="small" style={{ marginTop: 2 }}>
               {p.columns.map((c) => (
-                <li key={c.name}>
-                  <b>{c.name}</b> — {c.description}
-                </li>
+                <li key={c.name}><b>{c.name}</b> — {c.description}</li>
               ))}
             </ul>
             {p.sample && (
@@ -215,19 +214,11 @@ export default function StepCard({ db, step, completed, onComplete }: Props) {
                 <div style={{ overflow: 'auto' }}>
                   <table>
                     <thead>
-                      <tr>
-                        {p.sample.columns.map((c: string) => (
-                          <th key={c}>{c}</th>
-                        ))}
-                      </tr>
+                      <tr>{p.sample.columns.map((c: string) => <th key={c}>{c}</th>)}</tr>
                     </thead>
                     <tbody>
                       {p.sample.rows.slice(0, 10).map((r: any[], i: number) => (
-                        <tr key={i}>
-                          {r.map((v, j) => (
-                            <td key={j}>{v as any}</td>
-                          ))}
-                        </tr>
+                        <tr key={i}>{r.map((v, j) => <td key={j}>{v as any}</td>)}</tr>
                       ))}
                     </tbody>
                   </table>
@@ -244,25 +235,15 @@ export default function StepCard({ db, step, completed, onComplete }: Props) {
         onChange={setSql}
         onRun={onRun}
         onCheck={onCheck}
-        keywords={step.keywords ?? ['SELECT','FROM','WHERE','AND','OR','ORDER BY','ASC','DESC','IS NULL','COUNT','AVG','MIN','MAX','GROUP BY','HAVING','LIMIT']}
+        keywords={step.keywords ?? ['SELECT','FROM','WHERE','AND','OR','ORDER BY','ASC','DESC','IS NULL','LIMIT']}
       />
 
       <ResultTable result={result} error={error} />
-
-      {/* Acceptance tests */}
       <AcceptanceChecklist tests={tests} />
 
       {/* Solution (collapsible) */}
       <Disclosure title="Reveal Solution" defaultOpen={false}>
-        <pre
-          style={{
-            whiteSpace: 'pre-wrap',
-            fontFamily: 'var(--mono)',
-            fontSize: 13
-          }}
-        >
-          {step.modelSql}
-        </pre>
+        <pre style={{ whiteSpace: 'pre-wrap', fontFamily: 'var(--mono)', fontSize: 13 }}>{step.modelSql}</pre>
       </Disclosure>
 
       {/* Reflection + Hint ladder */}
@@ -292,15 +273,7 @@ export default function StepCard({ db, step, completed, onComplete }: Props) {
           <div className="small">Optional mini-variations.</div>
           {step.practices.map((p, idx) => (
             <Disclosure key={idx} title={`▶ ${p.prompt}`} defaultOpen={false}>
-              <pre
-                style={{
-                  whiteSpace: 'pre-wrap',
-                  fontFamily: 'var(--mono)',
-                  fontSize: 13
-                }}
-              >
-                {p.solutionSql}
-              </pre>
+              <pre style={{ whiteSpace: 'pre-wrap', fontFamily: 'var(--mono)', fontSize: 13 }}>{p.solutionSql}</pre>
             </Disclosure>
           ))}
         </div>
