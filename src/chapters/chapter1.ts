@@ -2,40 +2,27 @@ import type { Database } from 'sql.js';
 import type { Step, TablePreview } from '../components/StepCard';
 import type { QueryResult } from '../components/ResultTable';
 
-/** Helper: run SQL and return standardized result */
 function execQuery(db: Database, sql: string): QueryResult {
   const res = db.exec(sql);
   if (!res || res.length === 0) return { columns: [], rows: [] };
   return { columns: res[0].columns, rows: res[0].values as any[][] };
 }
 
-/** Standard validator: compare user result against model result */
 export function makeStandardValidator(modelSql: string, opts?: { enforceOrder?: boolean }) {
   const enforceOrder = opts?.enforceOrder ?? true;
   return async (db: Database, user: QueryResult | null) => {
     if (!user) return { ok: false, hint: 'Run your SQL first.' };
     let model: QueryResult;
-    try {
-      model = execQuery(db, modelSql);
-    } catch {
-      return { ok: false, hint: 'Internal model failed.' };
-    }
+    try { model = execQuery(db, modelSql); } catch { return { ok: false, hint: 'Internal model failed.' }; }
     const colsMatch = JSON.stringify(user.columns) === JSON.stringify(model.columns);
     if (!colsMatch) return { ok: false, hint: 'Columns mismatch. Check names/order.' };
-    if (user.rows.length !== model.rows.length) {
-      return { ok: false, hint: `Row count should be ${model.rows.length}.` };
-    }
+    if (user.rows.length !== model.rows.length) return { ok: false, hint: `Row count should be ${model.rows.length}.` };
     const norm = (v: any) => (typeof v === 'string' ? v.trim() : v);
     const A = enforceOrder ? user.rows : [...user.rows].sort();
     const B = enforceOrder ? model.rows : [...model.rows].sort();
     for (let i = 0; i < A.length; i++) {
       const ra = A[i], rb = B[i];
-      if (ra.length !== rb.length) return { ok: false, hint: 'Row shape mismatch.' };
-      for (let j = 0; j < ra.length; j++) {
-        if (norm(ra[j]) !== norm(rb[j])) {
-          return { ok: false, hint: enforceOrder ? 'Ordering or values differ.' : 'Values differ.' };
-        }
-      }
+      for (let j = 0; j < ra.length; j++) if (norm(ra[j]) !== norm(rb[j])) return { ok: false, hint: enforceOrder ? 'Ordering or values differ.' : 'Values differ.' };
     }
     return { ok: true };
   };
@@ -60,192 +47,214 @@ export const chapter1: Step[] = [
     id: '1-1',
     title: 'The Night Ledger — Who was scheduled on fire date?',
     tools: ['SELECT', 'WHERE', 'ORDER BY'],
-    challenge: 'The fire night doesn’t erase timecards.',
+    challenge: "The fire night doesn’t erase timecards.",
     plainRequest: 'Show everyone who worked on August 27, 2025. Include each person’s name, role, start time, and end time. Sort the list alphabetically by name.',
     dataPreview: [shiftPreview],
     expectedShape: [
       'Columns: employee_name, role, clock_in, clock_out',
+      "Sorted by employee_name ASC"
+    ],
+    modelSql: `
+SELECT employee_name, role, clock_in, clock_out
+FROM shift_logs
+WHERE date = '2025-08-27'
+ORDER BY employee_name ASC;
+`.trim(),
+    validator: makeStandardValidator(`
+SELECT employee_name, role, clock_in, clock_out
+FROM shift_logs
+WHERE date = '2025-08-27'
+ORDER BY employee_name ASC;`.trim(), { enforceOrder: true }),
+    reflection: 'Start with the roster; late departures shrink the haystack — not proof, but direction.',
+    practices: [
+      { prompt: 'Only names and roles for that date, sorted by role then name.', solutionSql: `SELECT employee_name, role FROM shift_logs WHERE date='2025-08-27' ORDER BY role, employee_name;` },
+      { prompt: 'Only cooks working that date.', solutionSql: `SELECT employee_name, role, clock_in, clock_out FROM shift_logs WHERE date='2025-08-27' AND role='Cook' ORDER BY employee_name;` }
+    ],
+    caseNote: 'Pulled roster for the fire night.',
+    starterSql: `-- Build the roster for 2025-08-27.
+SELECT employee_name, role, clock_in, clock_out
+FROM shift_logs
+WHERE date = '2025-08-27'
+ORDER BY employee_name;`,
+    keywords: ['SELECT','FROM','WHERE','ORDER BY','ASC'],
+    hints: [
+      "Filter on date = '2025-08-27'.",
+      'Pick only the four columns in the expected order.',
+      'Remember ORDER BY employee_name.'
+    ],
+    // Story intro for Step 1
+    introScreens: [
+      {
+        image: '/story/ch1-intro.svg',
+        alt: 'Neon alley, ledger glow',
+        title: 'Case File: The Night Ledger',
+        text: 'The power died at 22:41. Cash drawers froze, doors didn’t. You’re off-site. Start by pulling who was scheduled that night.'
+      },
+      { text: 'Answer in data, not gut: list every person who worked that date, with role and times.' }
+    ],
+    successLine: 'Roster locked. Names before alibis.'
+  },
+  {
+    id: '1-2',
+    title: 'Who left last?',
+    tools: ['ORDER BY', 'DESC', 'IS NOT NULL'],
+    challenge: 'The final light out is never random.',
+    plainRequest: 'Who clocked out the latest on Aug 27, 2025? Show name, role, end time. Sort by end time from latest to earliest.',
+    dataPreview: [shiftPreview],
+    expectedShape: [
+      'Columns: employee_name, role, clock_out',
+      "Filter out NULL clock_out",
+      'Sorted by clock_out DESC, then name'
+    ],
+    modelSql: `
+SELECT employee_name, role, clock_out
+FROM shift_logs
+WHERE date='2025-08-27' AND clock_out IS NOT NULL
+ORDER BY clock_out DESC, employee_name ASC;
+`.trim(),
+    validator: makeStandardValidator(`
+SELECT employee_name, role, clock_out
+FROM shift_logs
+WHERE date='2025-08-27' AND clock_out IS NOT NULL
+ORDER BY clock_out DESC, employee_name ASC;`.trim(), { enforceOrder: true }),
+    reflection: 'Late exits point to keys and responsibility — or cover.',
+    practices: [
+      { prompt: 'Top 3 latest clock-outs on any date.', solutionSql: `SELECT employee_name, role, date, clock_out FROM shift_logs WHERE clock_out IS NOT NULL ORDER BY clock_out DESC, date DESC LIMIT 3;` }
+    ],
+    caseNote: 'Identified the last departures on the fire night.',
+    starterSql: `SELECT employee_name, role, clock_out
+FROM shift_logs
+WHERE date='2025-08-27' AND clock_out IS NOT NULL
+ORDER BY clock_out DESC, employee_name;`,
+    keywords: ['SELECT','FROM','WHERE','ORDER BY','DESC','IS NOT NULL'],
+    hints: [
+      'Filter the date, exclude NULLs.',
+      'Sort by clock_out DESC.',
+      'Return exactly the three columns.'
+    ],
+    successLine: 'Final light: 23:55. Note who held the keys.'
+  },
+  {
+    id: '1-3',
+    title: 'Who has no clock_out?',
+    tools: ['IS NULL', 'ORDER BY'],
+    challenge: 'Missing times are loose threads.',
+    plainRequest: 'List the people from Aug 27, 2025 whose end time is missing. Include name, role, start and end time. Sort by name.',
+    dataPreview: [shiftPreview],
+    expectedShape: [
+      'Columns: employee_name, role, clock_in, clock_out',
+      'Filter: clock_out IS NULL',
       'Sorted by employee_name ASC'
     ],
     modelSql: `
 SELECT employee_name, role, clock_in, clock_out
 FROM shift_logs
-WHERE date = '2025-08-27'
-ORDER BY employee_name;
+WHERE date='2025-08-27' AND clock_out IS NULL
+ORDER BY employee_name ASC;
 `.trim(),
     validator: makeStandardValidator(`
 SELECT employee_name, role, clock_in, clock_out
 FROM shift_logs
-WHERE date = '2025-08-27'
-ORDER BY employee_name;`.trim(), { enforceOrder: true }),
-    reflection: 'A full roster turns chaos into a list. Lists become leads.',
+WHERE date='2025-08-27' AND clock_out IS NULL
+ORDER BY employee_name ASC;`.trim(), { enforceOrder: true }),
+    reflection: 'Gaps suggest scrambles. We flag, then verify.',
     practices: [
-      { prompt: 'Only show names and roles for 2025-08-27.', solutionSql: `SELECT employee_name, role FROM shift_logs WHERE date='2025-08-27' ORDER BY employee_name;` },
-      { prompt: 'Show all rows on 2025-08-27, earliest clock_in first.', solutionSql: `SELECT * FROM shift_logs WHERE date='2025-08-27' ORDER BY clock_in ASC;` }
+      { prompt: 'Across any date: rows with clock_out NULL.', solutionSql: `SELECT employee_name, role, date, clock_in FROM shift_logs WHERE clock_out IS NULL ORDER BY date, employee_name;` }
     ],
-    caseNote: 'Rostered personnel for 2025-08-27 captured.',
-    starterSql: `-- Translate the plain request into SQL.
-SELECT * FROM shift_logs LIMIT 5;`,
-    keywords: ['SELECT','FROM','WHERE','ORDER BY','ASC','DESC','AND','OR'],
-    hints: [
-      'Filter to the fire date only.',
-      'Return columns: employee_name, role, clock_in, clock_out (in that order).',
-      'Sort alphabetically by employee_name.'
-    ]
-  },
-  {
-    id: '1-2',
-    title: 'Ghost Shift — Who left last?',
-    tools: ['ORDER BY', 'DESC', 'LIMIT', 'WHERE'],
-    challenge: 'The last light out tells a story.',
-    plainRequest: 'On August 27, 2025, who left the latest? Show their name, role, and their clock-out time. Ignore people with no clock-out recorded.',
-    dataPreview: [shiftPreview],
-    expectedShape: [
-      'Columns: employee_name, role, clock_out',
-      'Single row: latest non-NULL clock_out on 2025-08-27'
-    ],
-    modelSql: `
-SELECT employee_name, role, clock_out
+    caseNote: 'Flagged missing clock-out entries for follow-up.',
+    starterSql: `SELECT employee_name, role, clock_in, clock_out
 FROM shift_logs
-WHERE date = '2025-08-27' AND clock_out IS NOT NULL
-ORDER BY clock_out DESC
-LIMIT 1;
-`.trim(),
-    validator: makeStandardValidator(`
-SELECT employee_name, role, clock_out
-FROM shift_logs
-WHERE date = '2025-08-27' AND clock_out IS NOT NULL
-ORDER BY clock_out DESC
-LIMIT 1;`.trim(), { enforceOrder: true }),
-    reflection: 'Late departures shrink the haystack. Not proof—but direction.',
-    practices: [
-      { prompt: 'Show the top 3 latest departures across all dates.', solutionSql: `SELECT employee_name, date, clock_out FROM shift_logs WHERE clock_out IS NOT NULL ORDER BY clock_out DESC LIMIT 3;` },
-      { prompt: 'For 2025-08-27, list everyone ordered by clock_out DESC.', solutionSql: `SELECT employee_name, role, clock_out FROM shift_logs WHERE date='2025-08-27' ORDER BY clock_out DESC;` }
-    ],
-    caseNote: 'Latest departure on 2025-08-27 identified.',
-    starterSql: `-- Translate the plain request into SQL.
-SELECT * FROM shift_logs WHERE date='2025-08-27' LIMIT 5;`,
-    keywords: ['SELECT','FROM','WHERE','ORDER BY','DESC','LIMIT','IS NOT NULL'],
-    hints: [
-      'Filter by date and exclude NULL clock_out.',
-      'Order by clock_out descending.',
-      'Limit to a single row.'
-    ]
-  },
-  {
-    id: '1-3',
-    title: 'Holes in the Tape — Who has no clock_out?',
-    tools: ['IS NULL', 'WHERE', 'ORDER BY'],
-    challenge: 'Missing timestamps are footprints.',
-    plainRequest: 'List all shifts that never recorded an end time. Show the person’s name, role, start time, and the empty end time. Sort by date first, then by name.',
-    dataPreview: [shiftPreview],
-    expectedShape: [
-      'Columns: employee_name, role, clock_in, clock_out',
-      'Order by date, then employee_name'
-    ],
-    modelSql: `
-SELECT employee_name, role, clock_in, clock_out
-FROM shift_logs
-WHERE clock_out IS NULL
-ORDER BY date, employee_name;
-`.trim(),
-    validator: makeStandardValidator(`
-SELECT employee_name, role, clock_in, clock_out
-FROM shift_logs
-WHERE clock_out IS NULL
-ORDER BY date, employee_name;`.trim(), { enforceOrder: true }),
-    reflection: 'Gaps in data aren’t empty—they’re loud.',
-    practices: [
-      { prompt: 'Only show missing clock_out on 2025-08-27.', solutionSql: `SELECT employee_name, role FROM shift_logs WHERE date='2025-08-27' AND clock_out IS NULL ORDER BY employee_name;` },
-      { prompt: 'Count missing clock_out across the month.', solutionSql: `SELECT date, COUNT(*) AS missing FROM shift_logs WHERE clock_out IS NULL GROUP BY date ORDER BY date;` }
-    ],
-    caseNote: 'Flagged missing clock_out entries for follow-up.',
-    starterSql: `-- Translate the plain request into SQL.
-SELECT * FROM shift_logs WHERE clock_out IS NULL LIMIT 5;`,
+WHERE date='2025-08-27' AND clock_out IS NULL
+ORDER BY employee_name;`,
     keywords: ['SELECT','FROM','WHERE','IS NULL','ORDER BY'],
     hints: [
-      'Use IS NULL to find missing clock_out.',
-      'Return columns: employee_name, role, clock_in, clock_out.',
-      'Sort by date then by employee_name.'
-    ]
+      'Use IS NULL on clock_out.',
+      'Keep the four requested columns.',
+      'Sort by name.'
+    ],
+    successLine: 'Two blanks on the tape. Escalate for confirmation.'
   },
   {
     id: '1-4',
-    title: 'After Hours — Who started after 20:00?',
-    tools: ['>', 'WHERE', 'ORDER BY'],
-    challenge: 'Night work narrows suspicion.',
-    plainRequest: 'Show everyone who started after 8:00 PM, any day. Include name, role, and start time. Sort by start time from earliest to latest.',
+    title: 'Who started after 8 PM?',
+    tools: ['WHERE', '>', 'ORDER BY'],
+    challenge: 'Late starts bend a timeline.',
+    plainRequest: 'From Aug 27, 2025, show people who started after 8:00 PM. Return name, role, and start time. Sort by name.',
     dataPreview: [shiftPreview],
     expectedShape: [
       'Columns: employee_name, role, clock_in',
-      'Sort by clock_in ASC'
+      "Filter: date='2025-08-27' AND clock_in > '20:00'",
+      'Sorted by employee_name ASC'
     ],
     modelSql: `
 SELECT employee_name, role, clock_in
 FROM shift_logs
-WHERE clock_in > '20:00'
-ORDER BY clock_in ASC;
+WHERE date='2025-08-27' AND clock_in > '20:00'
+ORDER BY employee_name ASC;
 `.trim(),
     validator: makeStandardValidator(`
 SELECT employee_name, role, clock_in
 FROM shift_logs
-WHERE clock_in > '20:00'
-ORDER BY clock_in ASC;`.trim(), { enforceOrder: true }),
-    reflection: 'When the city sleeps, patterns wake.',
+WHERE date='2025-08-27' AND clock_in > '20:00'
+ORDER BY employee_name ASC;`.trim(), { enforceOrder: true }),
+    reflection: 'Late arrivals don’t prove intent, but they reframe windows.',
     practices: [
-      { prompt: 'Who started at or after 21:00?', solutionSql: `SELECT employee_name, clock_in FROM shift_logs WHERE clock_in >= '21:00' ORDER BY clock_in;` }
+      { prompt: 'Same, but show just the names.', solutionSql: `SELECT employee_name FROM shift_logs WHERE date='2025-08-27' AND clock_in > '20:00' ORDER BY employee_name;` }
     ],
-    caseNote: 'Isolated after-hours starters.',
-    starterSql: `-- Translate the plain request into SQL.
-SELECT employee_name, role, clock_in
+    caseNote: 'Marked unusually late starters.',
+    starterSql: `SELECT employee_name, role, clock_in
 FROM shift_logs
-WHERE clock_in > '20:00'
-ORDER BY clock_in ASC;`,
-    keywords: ['SELECT','FROM','WHERE','>','ORDER BY','ASC'],
+WHERE date='2025-08-27' AND clock_in > '20:00'
+ORDER BY employee_name;`,
+    keywords: ['SELECT','FROM','WHERE','>','ORDER BY'],
     hints: [
-      'Compare clock_in to a time threshold.',
-      'Return employee_name, role, clock_in.',
-      'Sort by clock_in ascending.'
-    ]
+      "Use a string compare on '20:00'.",
+      'Return exactly three columns.',
+      'Sort by name.'
+    ],
+    successLine: 'Late starters isolated. Timeline tightens.'
   },
   {
     id: '1-5',
-    title: 'First Shortlist — Combine simple filters',
-    tools: ['SELECT', 'WHERE', 'ORDER BY', 'AND', 'OR', 'IS NOT NULL'],
-    challenge: 'A shortlist isn’t proof—just a direction.',
-    plainRequest: 'From the fire night only, list people who either started after 8:00 PM OR left at/after 11:00 PM (and have an end time). Show name, role, start and end times. Sort by start time from earliest to latest.',
+    title: 'First shortlist',
+    tools: ['WHERE', 'ORDER BY', 'OR'],
+    challenge: 'Thin the crowd; keep the truth.',
+    plainRequest: 'Build a quick shortlist: from Aug 27, 2025, return names and roles for people who either left at/after 11 PM or have no end time. Sort by name.',
     dataPreview: [shiftPreview],
     expectedShape: [
-      'Columns: employee_name, role, clock_in, clock_out',
-      "Filter: date='2025-08-27' AND (clock_in > '20:00' OR (clock_out IS NOT NULL AND clock_out >= '23:00'))",
-      'Sorted by clock_in ASC'
+      'Columns: employee_name, role',
+      "Filter: (clock_out >= '23:00' OR clock_out IS NULL) AND date='2025-08-27'",
+      'Sorted by employee_name ASC'
     ],
     modelSql: `
-SELECT employee_name, role, clock_in, clock_out
+SELECT employee_name, role
 FROM shift_logs
 WHERE date='2025-08-27'
-  AND (clock_in > '20:00' OR (clock_out IS NOT NULL AND clock_out >= '23:00'))
-ORDER BY clock_in ASC;
+  AND (clock_out >= '23:00' OR clock_out IS NULL)
+ORDER BY employee_name ASC;
 `.trim(),
     validator: makeStandardValidator(`
-SELECT employee_name, role, clock_in, clock_out
+SELECT employee_name, role
 FROM shift_logs
 WHERE date='2025-08-27'
-  AND (clock_in > '20:00' OR (clock_out IS NOT NULL AND clock_out >= '23:00'))
-ORDER BY clock_in ASC;`.trim(), { enforceOrder: true }),
-    reflection: 'Shortlists don’t solve cases. They tell you where to look next.',
+  AND (clock_out >= '23:00' OR clock_out IS NULL)
+ORDER BY employee_name ASC;`.trim(), { enforceOrder: true }),
+    reflection: 'Shortlists move the work forward; proof comes later.',
     practices: [
-      { prompt: 'Fire night: only late leavers (>= 23:00).', solutionSql: `SELECT employee_name, clock_out FROM shift_logs WHERE date='2025-08-27' AND clock_out >= '23:00' ORDER BY clock_out DESC;` },
-      { prompt: 'Fire night: exclude missing clock_out.', solutionSql: `SELECT employee_name, role FROM shift_logs WHERE date='2025-08-27' AND clock_out IS NOT NULL ORDER BY employee_name;` }
+      { prompt: 'Shortlist variant: start after 20:00 *or* left after 23:00.', solutionSql: `SELECT employee_name, role FROM shift_logs WHERE date='2025-08-27' AND (clock_in > '20:00' OR clock_out >= '23:00') ORDER BY employee_name;` },
+      { prompt: 'Only roles on the shortlist (unique).', solutionSql: `SELECT DISTINCT role FROM shift_logs WHERE date='2025-08-27' AND (clock_out >= '23:00' OR clock_out IS NULL) ORDER BY role;` }
     ],
-    caseNote: 'Built first shortlist from fire-night outliers.',
-    starterSql: `-- Translate the plain request into SQL.
-SELECT * FROM shift_logs WHERE date='2025-08-27' LIMIT 5;`,
-    keywords: ['SELECT','FROM','WHERE','AND','OR','IS NOT NULL','ORDER BY','ASC','>='],
+    caseNote: 'Drafted an initial shortlist from extremes and gaps.',
+    starterSql: `SELECT employee_name, role
+FROM shift_logs
+WHERE date='2025-08-27' AND (clock_out >= '23:00' OR clock_out IS NULL)
+ORDER BY employee_name;`,
+    keywords: ['SELECT','FROM','WHERE','ORDER BY','OR','ASC'],
     hints: [
-      'Filter to the fire date.',
-      'Include late starters or late leavers (two-part condition).',
-      'Sort by clock_in ascending.'
-    ]
+      'Combine conditions with OR.',
+      'Keep just name and role.',
+      'Alphabetize by name.'
+    ],
+    successLine: 'Shortlist drafted. Follow the edges next.'
   }
 ];

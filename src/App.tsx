@@ -1,11 +1,13 @@
-// src/App.tsx
-import React from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import type { Database } from 'sql.js';
-import initDb from './db/initDb'; // ✅ default import
+import initDb from './db/initDb';
+
 import StepCard, { Step } from './components/StepCard';
-import Caseboard from './components/Caseboard';
+import Caseboard, { CaseNote } from './components/Caseboard';
 import ProgressBar from './components/ProgressBar';
-import MobileNav, { ChapterMeta } from './components/MobileNav'; // ✅ mobile navigator
+
+import NarrativeOverlay from './components/NarrativeOverlay';
+import { PROLOGUE, CH1_EPILOGUE, CH2_HOOK } from './story/narratives';
 
 import { chapter1 } from './chapters/chapter1';
 import { chapter2 } from './chapters/chapter2';
@@ -15,8 +17,8 @@ import { chapter5 } from './chapters/chapter5';
 import { chapter6 } from './chapters/chapter6';
 import { finale } from './chapters/finale';
 
-// Define locally (don’t import from Caseboard)
-export type CaseNote = { id: string; text: string; ts: string };
+// ➕ MOBILE NAV import (new)
+import MobileNav, { ChapterMeta } from './components/MobileNav';
 
 type Chapter = { id: string; title: string; steps: Step[] };
 
@@ -33,7 +35,10 @@ const CHAPTERS: Chapter[] = [
 const LS_PROGRESS = 'sql-noir-progress';
 const LS_CASEBOARD = 'sql-noir-caseboard';
 const LS_CASEBOARD_COLLAPSE = 'sql-noir-caseboard-collapsed';
-const LAST_POS_KEY = 'sql-noir-lastpos';
+
+const SEEN_PROLOGUE = 'sql-noir:seen:prologue';
+const SEEN_CH1_EPILOGUE = 'sql-noir:seen:ch1-epilogue';
+const SEEN_CH2_HOOK = 'sql-noir:seen:ch2-hook';
 
 type Progress = Record<string, Record<string, boolean>>; // {chapterId: {stepId: true}}
 
@@ -41,89 +46,85 @@ function loadProgress(): Progress {
   try { return JSON.parse(localStorage.getItem(LS_PROGRESS) || '{}') as Progress; }
   catch { return {}; }
 }
-function saveProgress(p: Progress) {
-  localStorage.setItem(LS_PROGRESS, JSON.stringify(p));
-}
+function saveProgress(p: Progress) { localStorage.setItem(LS_PROGRESS, JSON.stringify(p)); }
+
 function loadNotes(): CaseNote[] {
   try { return JSON.parse(localStorage.getItem(LS_CASEBOARD) || '[]') as CaseNote[]; }
   catch { return []; }
 }
-function saveNotes(n: CaseNote[]) {
-  localStorage.setItem(LS_CASEBOARD, JSON.stringify(n));
+function saveNotes(n: CaseNote[]) { localStorage.setItem(LS_CASEBOARD, JSON.stringify(n)); }
+
+// ➕ Chapter summary text and helper
+const CHAPTER_SUMMARY: Record<string, string> = {
+  '1': 'Roster confirmed. Outliers flagged (late exits, missing clock_outs, late starts). Shortlist created.',
+  '2': 'Thirty-day baselines computed. Anomalies vs personal norms identified.',
+  '3': 'Shifts cross-checked with door and POS. Inconsistencies flagged.',
+  '4': 'Insurance drafts/claims analyzed. Paperwork anomalies surfaced.',
+  '5': 'Critical time windows isolated. Opportunity overlaps mapped.',
+  '6': 'Integrity checks complete. Data failures aligned with anomalies.',
+  'F': 'Final synthesis prepared. Ranked list with reasons and timestamps.'
+};
+function isChapterComplete(chId: string, prog: Progress): boolean {
+  const chapter = CHAPTERS.find(c => c.id === chId);
+  if (!chapter) return false;
+  const done = Object.values(prog[chId] || {}).filter(Boolean).length;
+  return done >= chapter.steps.length;
 }
 
 export default function App() {
-  const [db, setDb] = React.useState<Database | null>(null);
-  const [progress, setProgress] = React.useState<Progress>(loadProgress());
-  const [notes, setNotes] = React.useState<CaseNote[]>(loadNotes());
-  const [collapsed, setCollapsed] = React.useState<boolean>(localStorage.getItem(LS_CASEBOARD_COLLAPSE) === '1');
+  const [db, setDb] = useState<Database | null>(null);
+  const [chapId, setChapId] = useState<string>('1');
+  const [stepId, setStepId] = useState<string>(CHAPTERS[0].steps[0].id);
 
-  // Mobile overlay toggles (sidebar/caseboard)
-  const [mobileNav, setMobileNav] = React.useState<null | 'left' | 'right'>(null);
+  const [progress, setProgress] = useState<Progress>(loadProgress());
+  const [notes, setNotes] = useState<CaseNote[]>(loadNotes());
+  const [collapsed, setCollapsed] = useState<boolean>(localStorage.getItem(LS_CASEBOARD_COLLAPSE) === '1');
 
-  // Persist last position (chapter + step)
-  const [pos, setPos] = React.useState(() => {
-    try {
-      const raw = localStorage.getItem(LAST_POS_KEY);
-      if (raw) return JSON.parse(raw) as { chapterIndex: number; stepIndex: number };
-    } catch {}
-    return { chapterIndex: 0, stepIndex: 0 };
-  });
+  // Narrative overlays
+  const [showPrologue, setShowPrologue] = useState<boolean>(() => localStorage.getItem(SEEN_PROLOGUE) !== '1');
+  const [showCh1Epilogue, setShowCh1Epilogue] = useState<boolean>(false);
+  const [showCh2Hook, setShowCh2Hook] = useState<boolean>(false);
 
-  React.useEffect(() => {
-    let mounted = true;
-    initDb().then((d) => { if (mounted) setDb(d); });
-    return () => { mounted = false; };
-  }, []);
+  useEffect(() => { (async () => setDb(await initDb()))(); }, []);
 
-  React.useEffect(() => {
-    localStorage.setItem(LAST_POS_KEY, JSON.stringify(pos));
-  }, [pos]);
+  const currentChapter = useMemo(() => CHAPTERS.find(c => c.id === chapId)!, [chapId]);
+  const currentStep = useMemo(() => currentChapter.steps.find(s => s.id === stepId) ?? currentChapter.steps[0], [currentChapter, stepId]);
+  const isStepDone = useMemo(() => !!progress[chapId]?.[currentStep.id], [progress, chapId, currentStep.id]);
 
-  const chapters: ChapterMeta[] = React.useMemo(() =>
-    CHAPTERS.map(c => ({ id: c.id, title: c.title, steps: c.steps })), []);
+  const chapter1DoneCount = useMemo(() => Object.values(progress['1'] || {}).filter(Boolean).length, [progress]);
+  const isChapter1Complete = chapter1DoneCount >= CHAPTERS[0].steps.length;
 
-  const currentChapter = CHAPTERS[pos.chapterIndex];
-  const currentStep = currentChapter.steps[pos.stepIndex];
-  const isStepDone = !!progress[currentChapter.id]?.[currentStep.id];
+  // If Chapter 1 is complete and epilogue not shown yet, pop it
+  useEffect(() => {
+    if (isChapter1Complete && localStorage.getItem(SEEN_CH1_EPILOGUE) !== '1') {
+      setShowCh1Epilogue(true);
+    }
+  }, [isChapter1Complete]);
+
+  // When user enters Chapter 2 first time, show hook if not seen
+  useEffect(() => {
+    if (chapId === '2' && localStorage.getItem(SEEN_CH2_HOOK) !== '1') {
+      setShowCh2Hook(true);
+    }
+  }, [chapId]);
 
   function markComplete(note: string) {
-    const p = { ...progress, [currentChapter.id]: { ...(progress[currentChapter.id] || {}), [currentStep.id]: true } };
+    const p = { ...progress, [chapId]: { ...(progress[chapId] || {}), [currentStep.id]: true } };
     setProgress(p); saveProgress(p);
-    const newNote: CaseNote = { id: `${currentChapter.id}-${currentStep.id}-${Date.now()}`, text: note, ts: new Date().toLocaleString() };
+
+    const newNote: CaseNote = { id: `${chapId}-${currentStep.id}-${Date.now()}`, text: note, ts: new Date().toLocaleString() };
     const newNotes = [newNote, ...notes].slice(0, 200);
     setNotes(newNotes); saveNotes(newNotes);
   }
 
-  function onJump(chapterIndex: number, stepIndex: number) {
-    setPos({ chapterIndex, stepIndex });
-    setMobileNav(null);
-  }
-  function onPrev() {
-    let c = pos.chapterIndex;
-    let s = pos.stepIndex - 1;
-    if (s < 0) {
-      if (c === 0) return;
-      c -= 1; s = CHAPTERS[c].steps.length - 1;
-    }
-    setPos({ chapterIndex: c, stepIndex: s });
-  }
-  function onNext() {
-    let c = pos.chapterIndex;
-    let s = pos.stepIndex + 1;
-    if (s >= CHAPTERS[c].steps.length) {
-      if (c >= CHAPTERS.length - 1) return;
-      c += 1; s = 0;
-    }
-    setPos({ chapterIndex: c, stepIndex: s });
+  function toggleChapter(id: string) {
+    setChapId(id);
+    const firstId = CHAPTERS.find(c => c.id === id)!.steps[0].id;
+    setStepId(firstId);
   }
 
-  const doneCount = React.useMemo(() =>
-    CHAPTERS.reduce((acc, c) => acc + Object.values(progress[c.id] || {}).filter(Boolean).length, 0),
-    [progress]
-  );
-  const totalCount = React.useMemo(() =>
-    CHAPTERS.reduce((acc, c) => acc + c.steps.length, 0), []);
+  const doneCount = useMemo(() => CHAPTERS.reduce((acc, c) => acc + Object.values(progress[c.id] || {}).filter(Boolean).length, 0), [progress]);
+  const totalCount = useMemo(() => CHAPTERS.reduce((acc, c) => acc + c.steps.length, 0), []);
 
   function clearNotes() { setNotes([]); saveNotes([]); }
   function toggleCollapse() {
@@ -131,51 +132,131 @@ export default function App() {
     localStorage.setItem(LS_CASEBOARD_COLLAPSE, v ? '1' : '0');
   }
 
-  return (
-    <div className={`app ${mobileNav === 'left' ? 'show-sidebar' : ''} ${mobileNav === 'right' ? 'show-caseboard' : ''}`}>
-      {/* Mobile top bar */}
-      <div className="topbar">
-        <div className="row">
-          <button onClick={() => setMobileNav(mobileNav === 'left' ? null : 'left')}>☰ Menu</button>
-          <div className="brand">SQL Noir</div>
-          <div style={{ marginLeft: 'auto' }}>
-            <button onClick={() => setMobileNav(mobileNav === 'right' ? null : 'right')}>📌 Caseboard</button>
-          </div>
-        </div>
-      </div>
+  async function resetGame() {
+    const yes = window.confirm('Reset all progress and re-seed the database? This cannot be undone.');
+    if (!yes) return;
 
-      {/* Sidebar (chapters/steps) */}
-      <aside className="sidebar" aria-label="Chapters and steps">
-        <h2 style={{ marginTop: 0 }}>SQL Noir</h2>
+    try { (db as any)?.close?.(); } catch {}
+
+    // Wipe app keys
+    for (let i = localStorage.length - 1; i >= 0; i--) {
+      const k = localStorage.key(i)!;
+      if (k && k.startsWith('sql-noir')) localStorage.removeItem(k);
+    }
+
+    setProgress({}); setNotes([]); setCollapsed(false);
+    setChapId('1'); setStepId(CHAPTERS[0].steps[0].id);
+
+    // Re-show prologue after reset
+    setShowPrologue(true);
+    setShowCh1Epilogue(false);
+    setShowCh2Hook(false);
+
+    setDb(null);
+    const fresh = await initDb();
+    setDb(fresh);
+  }
+
+  // ➕ MOBILE NAV helpers (new)
+  const chapterIndex = useMemo(
+    () => CHAPTERS.findIndex(c => c.id === chapId),
+    [chapId]
+  );
+  const stepIndex = useMemo(
+    () => Math.max(0, currentChapter.steps.findIndex(s => s.id === stepId)),
+    [currentChapter, stepId]
+  );
+
+  function onJump(chIdx: number, stIdx: number) {
+    const ch = CHAPTERS[chIdx];
+    if (!ch) return;
+    setChapId(ch.id);
+    const targetStep = ch.steps[stIdx]?.id ?? ch.steps[0].id;
+    setStepId(targetStep);
+  }
+
+  function onPrev() {
+    let c = chapterIndex;
+    let s = stepIndex - 1;
+    if (s < 0) {
+      if (c === 0) return;
+      c -= 1; s = CHAPTERS[c].steps.length - 1;
+    }
+    onJump(c, s);
+  }
+
+  function onNext() {
+    let c = chapterIndex;
+    let s = stepIndex + 1;
+    if (s >= CHAPTERS[c].steps.length) {
+      if (c >= CHAPTERS.length - 1) return;
+      c += 1; s = 0;
+    }
+    onJump(c, s);
+  }
+
+  // ➕ Roll up completed chapters into a single summary pin
+  function rollupChapter(chId: string) {
+    // already summarized?
+    if (notes.some(n => n.id.startsWith(`S-${chId}-`))) return;
+    // has live pins for this chapter?
+    const hasLivePins = notes.some(n => n.id.startsWith(`${chId}-`));
+    if (!hasLivePins) return;
+
+    const summaryText = CHAPTER_SUMMARY[chId] || `Chapter ${chId} complete. Pins archived.`;
+    const summary: CaseNote = {
+      id: `S-${chId}-${Date.now()}`,
+      text: summaryText,
+      ts: new Date().toLocaleString()
+    };
+
+    const pruned = notes.filter(n => !n.id.startsWith(`${chId}-`));
+    const updated = [summary, ...pruned];
+    setNotes(updated);
+    saveNotes(updated);
+  }
+
+  useEffect(() => {
+    // Check all chapters; roll up any newly completed one
+    CHAPTERS.forEach(c => {
+      if (isChapterComplete(c.id, progress)) {
+        rollupChapter(c.id);
+      }
+    });
+  }, [progress]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  return (
+    <div className="app">
+      {/* Sidebar */}
+      <div className="panel sidebar">
+        <div className="row" style={{ alignItems: 'center', justifyContent: 'space-between' }}>
+          <h2>SQL Noir</h2>
+          <button className="danger tiny" onClick={resetGame} title="Reset progress and database">Reset</button>
+        </div>
         <div style={{ padding: '0 12px 12px' }}>
           <ProgressBar done={doneCount} total={totalCount} />
         </div>
-
-        {CHAPTERS.map((ch, ci) => {
+        {CHAPTERS.map(ch => {
           const chDone = Object.values(progress[ch.id] || {}).filter(Boolean).length;
-          const open = ci === pos.chapterIndex;
           return (
             <div className="chapter" key={ch.id}>
-              <div className="chapter-header" onClick={() => onJump(ci, 0)}>
+              <div className="chapter-header" onClick={() => toggleChapter(ch.id)}>
                 <div className="chapter-title">{ch.title}</div>
                 <div className="small">{chDone}/{ch.steps.length}</div>
               </div>
-              {open && (
+              {chapId === ch.id && (
                 <div className="steps">
-                  {ch.steps.map((s, si) => {
+                  {ch.steps.map(s => {
                     const done = !!progress[ch.id]?.[s.id];
-                    const active = open && si === pos.stepIndex;
                     return (
                       <div
                         key={s.id}
                         className="step-link"
-                        onClick={() => onJump(ci, si)}
-                        style={{ background: active ? '#121b27' : undefined }}
+                        onClick={() => setStepId(s.id)}
+                        style={{ background: stepId === s.id ? '#121b27' : undefined }}
                       >
                         <div className={`dot ${done ? 'done' : ''}`} />
-                        <div className="small" style={{ color: active ? '#b9ffea' : undefined }}>
-                          {si + 1}. {s.title}
-                        </div>
+                        <div className="small" style={{ color: stepId === s.id ? '#b9ffea' : undefined }}>{s.title}</div>
                       </div>
                     );
                   })}
@@ -184,39 +265,91 @@ export default function App() {
             </div>
           );
         })}
-        <div className="footer">“You’re off-site. They’re in the dark.”</div>
-      </aside>
+        <div className="footer">Plain requests → clear queries → small wins.</div>
+      </div>
 
       {/* Main */}
-      <main className="main" onClick={() => setMobileNav(null)}>
-        <div style={{ marginBottom: 10 }}>
-          {/* If you have a chapter-level progress bar component, keep it here */}
-        </div>
-
+      <div className="panel main">
         {!db ? (
-          <div className="step-card"><h3>Initializing database…</h3></div>
+          <div className="block"><h3>Initializing database…</h3></div>
         ) : (
-          <StepCard
-            db={db}
-            step={currentStep}
-            completed={isStepDone}
-            onComplete={markComplete}
-          />
+          <>
+            <StepCard
+              db={db}
+              step={currentStep}
+              completed={isStepDone}
+              onComplete={markComplete}
+            />
+            {/* ➕ Mobile-only bottom navigator */}
+            <MobileNav
+              chapters={CHAPTERS as unknown as ChapterMeta[]}
+              currentChapterIndex={chapterIndex}
+              currentStepIndex={stepIndex}
+              onJump={onJump}
+              onPrev={onPrev}
+              onNext={onNext}
+            />
+          </>
         )}
+      </div>
 
-        {/* Mobile bottom navigator */}
-        <MobileNav
-          chapters={chapters}
-          currentChapterIndex={pos.chapterIndex}
-          currentStepIndex={pos.stepIndex}
-          onJump={onJump}
-          onPrev={onPrev}
-          onNext={onNext}
+      {/* Caseboard */}
+      <Caseboard
+        notes={notes}
+        collapsed={collapsed}
+        onToggle={toggleCollapse}
+        onClear={clearNotes}
+        currentChapterId={chapId}  // ➕ filter to current chapter’s live pins
+      />
+
+      {/* PROLOGUE (shows once on first load or after Reset) */}
+      {showPrologue && (
+        <NarrativeOverlay
+          open={showPrologue}
+          title={PROLOGUE.title}
+          paragraphs={PROLOGUE.paragraphs}
+          onClose={() => { localStorage.setItem(SEEN_PROLOGUE, '1'); setShowPrologue(false); }}
+          ctaLabel={PROLOGUE.ctaLabel}
+          onCta={() => {
+            localStorage.setItem(SEEN_PROLOGUE, '1');
+            setShowPrologue(false);
+            setChapId('1');
+            setStepId(CHAPTERS[0].steps[0].id);
+          }}
         />
-      </main>
+      )}
 
-      {/* Caseboard (right) */}
-      <Caseboard notes={notes} collapsed={collapsed} onToggle={toggleCollapse} onClear={clearNotes} />
+      {/* CH1 EPILOGUE (auto after all Ch1 steps complete) */}
+      {showCh1Epilogue && (
+        <NarrativeOverlay
+          open={showCh1Epilogue}
+          title={CH1_EPILOGUE.title}
+          paragraphs={CH1_EPILOGUE.paragraphs}
+          onClose={() => { localStorage.setItem(SEEN_CH1_EPILOGUE, '1'); setShowCh1Epilogue(false); }}
+          ctaLabel={CH1_EPILOGUE.ctaLabel}
+          onCta={() => {
+            localStorage.setItem(SEEN_CH1_EPILOGUE, '1');
+            setShowCh1Epilogue(false);
+            setChapId('2');
+            setStepId(CHAPTERS[1].steps[0].id);
+          }}
+        />
+      )}
+
+      {/* CH2 HOOK (first time Chapter 2 opens) */}
+      {showCh2Hook && (
+        <NarrativeOverlay
+          open={showCh2Hook}
+          title={CH2_HOOK.title}
+          paragraphs={CH2_HOOK.paragraphs}
+          onClose={() => { localStorage.setItem(SEEN_CH2_HOOK, '1'); setShowCh2Hook(false); }}
+          ctaLabel={CH2_HOOK.ctaLabel}
+          onCta={() => {
+            localStorage.setItem(SEEN_CH2_HOOK, '1');
+            setShowCh2Hook(false);
+          }}
+        />
+      )}
     </div>
   );
 }

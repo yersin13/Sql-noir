@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="600" viewBox="0 0 1200 600">
+  <rect width="100%" height="100%" fill="#0e1621"></rect>
+  <rect x="140" y="180" width="920" height="240" fill="#0c1723" stroke="#263a4e"></rect>
+  <text x="170" y="245" font-family="monospace" font-size="26" fill="#e6f6ff">Ghost Shift</text>
+  <text x="170" y="285" font-family="monospace" font-size="18" fill="#b8d9f2">Late nights leave patterns. Count them.</text>
+</svg>

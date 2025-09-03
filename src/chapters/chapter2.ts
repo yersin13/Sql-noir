@@ -104,6 +104,10 @@ ORDER BY late_nights DESC, employee_name;`,
       'Exclude NULL clock_out and compare times using the same HH:MM format.',
       "Add a date window: date >= '2025-07-28'.",
       'Sort by count DESC, then name ASC.'
+    ],
+    // NEW — story intro
+    introScreens: [
+      { image: '/story/ghost-shift.svg', text: 'Ghost Shift. Count who pushes past 11 PM — routine or ritual?' }
     ]
   },
   {
